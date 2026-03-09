@@ -5,7 +5,10 @@ plugins {
     id("io.spring.dependency-management") version "1.1.7"
     kotlin("plugin.jpa") version "2.2.21"
     kotlin("kapt") version "2.2.21"
+    id("io.sentry.jvm.gradle") version "6.1.0"
 }
+
+extra["sentryVersion"] = "8.33.0"
 
 group = "com"
 version = "0.0.1-SNAPSHOT"
@@ -33,6 +36,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-cache")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("io.sentry:sentry-spring-boot-4-starter")
     developmentOnly("org.springframework.boot:spring-boot-devtools")
 
     // Kotlin
@@ -82,6 +86,12 @@ kotlin {
     }
 }
 
+dependencyManagement {
+    imports {
+        mavenBom("io.sentry:sentry-bom:${property("sentryVersion")}")
+    }
+}
+
 allOpen {
     annotation("jakarta.persistence.Entity")
     annotation("jakarta.persistence.MappedSuperclass")
@@ -92,4 +102,15 @@ tasks {
     withType<Test> {
         useJUnitPlatform()
     }
+}
+
+sentry {
+    // Generates a JVM (Java, Kotlin, etc.) source bundle and uploads your source code to Sentry.
+    // This enables source context, allowing you to see your source
+    // code as part of your stack traces in Sentry.
+    includeSourceContext = true
+
+    org = "earth-5x"
+    projectName = "java-spring-boot"
+    authToken = System.getenv("PROD___SENTRY_AUTH_TOKEN")
 }
