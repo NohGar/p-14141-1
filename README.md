@@ -11,14 +11,14 @@
 flowchart TD
     Client[Browser / Next.js Client] -->|HTTP / WebSocket| NPMplus[Nginx Proxy Manager]
     
-    subgraph AWS EC2 (t3.micro)
+    subgraph AWS_EC2 [AWS EC2 t3.micro]
         NPMplus -->|API Requests| SpringBoot[Spring Boot Backend]
         NPMplus -->|SSE / WebSockets| SpringBoot
         SpringBoot --> Redis[(Redis)]
         SpringBoot --> PostgreSQL[(PostgreSQL)]
     end
 
-    subgraph GitHub Actions
+    subgraph GitHub_Actions [GitHub Actions]
         Push[Push to main] --> Build[Build & Push to GHCR]
         Build --> Deploy[SSM Blue/Green Deploy]
         Deploy --> NPMplus
@@ -66,14 +66,3 @@ cp secrets.tf.default secrets.tf # 민감 정보 입력
 terraform init
 terraform apply
 ```
-
----
-
-## 📌 확인된 구조적 개선 과제 (Anomaly Report)
-
-현재 아키텍처 상 추가적인 보완이 논의된 주요 항목들입니다.
-1. **프론트엔드 배포 자동화 부재**: 현재 `.github/workflows/` 배포는 백엔드만 담당합니다. 프론트엔드(Vercel 등) CD 연결이 누락되어 있습니다.
-2. **보안 그룹 개방 및 평문 키**: `infra`의 AWS Security Group이 전체 개방 상태이며, `user_data` 셸에 DB 비밀번호가 평문으로 들어갑니다. (AWS SSM Parameter Store 활용 필요)
-3. **Redis 휘발성 정책 제한**: Docker로 구동되는 Redis가 50MB 용량 및 `allkeys-lru` 정책으로 구동되어, Oauth2 세션이나 분산 락(ShedLock) 키 유실의 원인이 될 수 있습니다. 
-
-상세 분석 내용은 별도로 작성된 **[구조적 이상점 리포트](anomaly_report.md)**를 참조하세요.

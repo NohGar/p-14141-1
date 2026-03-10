@@ -35,7 +35,7 @@
    - `pg_1 (PostgreSQL)`: 실제 데이터를 적재할 메인 RDBMS 구동
 5. **GHCR 로그인**: 배포 시 프라이빗 이미지가 존재할 경우를 대비하여 `GitHub Container Registry` 자격 증명(토큰) 캐싱
 
-이 작업이 완료되면 인스턴스는 즉시 GitHub Action(`deploy.yml`)이 구동될 수 있는 레디 상태가 됩니다.
+이 작업이 완료되면 인스턴스는 GitHub Action(`deploy.yml`) 배포 대상이 될 준비 상태가 됩니다.
 
 ---
 
@@ -44,7 +44,7 @@
 이 저장소의 코드를 실제로 당신의 AWS 계정에 반영하려면 아래 순서를 따르세요.
 
 ### 1단계: 시크릿 설정 파일 준비
-`secrets.tf.default` (또는 `.example`) 파일의 내용을 참고하여 실제 민감 데이터가 담길 `secrets.tf` 를 생성합니다.
+`secrets.tf.default` 파일의 내용을 참고하여 실제 민감 데이터가 담길 `secrets.tf` 를 생성합니다.
 ```bash
 cp secrets.tf.default secrets.tf
 ```

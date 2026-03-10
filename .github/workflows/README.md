@@ -1,29 +1,30 @@
-# GitHub Actions 워크플로우 (.github)
+# GitHub Actions 워크플로우
 
-이 디렉토리는 서비스의 CI/CD (지속적 통합 및 배포) 파이프라인 설정을 담고 있습니다. 
-주요 파일은 `.github/workflows/deploy.yml` 이며, 백엔드 코드의 변경사항이 메인 브랜치에 푸시되었을 때 **Blue/Green 방식의 무중단 배포**를 수행합니다.
+이 폴더는 서비스 배포 파이프라인을 구성합니다.  
+실행 파일은 `.github/workflows/deploy.yml` 하나이며, `main` 브랜치에 `back` 관련 변경사항이 올라오면 **Blue/Green 무중단 배포**가 실행됩니다.
 
 ---
 
-## 🔄 전체 배포 파이프라인 개요
+## 🔄 배포 파이프라인 개요
 
-이 배포 파이프라인은 크게 4가지 단계(Job)로 자동 실행됩니다:
+`deploy.yml`은 4개의 Job으로 구성됩니다.
 
 1. **Tag Calculation (`calculateTag`)**
-   - 현재 커밋 기록과 릴리스 내역을 바탕으로 다음 Semantic 버전 태그명(예: `v1.2.3`)을 계산합니다. (실제 태그 생성은 이 단계에서 하지 않고 드라이 런으로 진행)
+   - `mathieudutour/github-tag-action`을 `dry_run: true`로 호출해 다음 태그 값을 계산만 합니다.
 
 2. **Docker Build & Push (`buildImageAndPush`)**
-   - 백엔드의 핫 소스코드가 담긴 `back/` 디렉토리를 기준으로 Docker 이미지를 빌드합니다.
-   - 빌드 속도 향상을 위해 GitHub Actions 캐시(`cache-from`, `cache-to`)를 최대한 활용합니다.
-   - 빌드된 이미지는 **GitHub Container Registry (GHCR)** 에 푸시되며, 버전 태그 및 `latest` 태그가 동시에 붙습니다.
+   - `back/`를 컨텍스트로 하여 Docker 이미지를 빌드합니다.
+   - GHCR(`ghcr.io`)에 `latest`와 계산된 버전 태그를 같이 푸시합니다.
+   - `cache-from`, `cache-to`를 써서 빌드 캐시를 활용합니다.
 
 3. **Blue/Green 무중단 배포 (`deploy`)**
-   - 가장 복잡하고 핵심적인 단계로, **SSM (AWS Systems Manager)** 을 이용해 타겟 EC2의 셸에 직접 원격으로 배포 스크립트를 밀어넣어 격리 실행합니다.
-   - 다운타임을 없애기 위해 EC2 내부의 **NPMplus (Nginx Proxy Manager)** 와 연동하여 현재 구동중이지 않은 "Green" 컨테이너 슬롯을 띄운 후, `actuator/health` 헬스체크가 통과(200 OK)하면 NPMplus의 Proxy Host 라우팅 주소를 스위칭합니다.
-   - 모든 검증이 정상적으로 통과하여 스위칭이 완료되면 이전의 백엔드 컨테이너("Blue")를 내리고 더미/오래된 이미지를 청소합니다.
+   - AWS 자격증명으로 SSM 실행 권한을 구성한 뒤, 타겟 EC2에 배포 스크립트를 보내 실행합니다.
+   - NPMplus API로 대상 Proxy Host를 조회/생성하고, Green 슬롯 컨테이너를 기동합니다.
+   - Green이 `http://{컨테이너 IP}:8080/actuator/health` 200 응답을 보일 때까지 대기한 뒤, Proxy Host의 upstream을 Green으로 전환합니다.
+   - 전환 성공 시 기존 Blue 컨테이너는 종료/정리하고, 불필요한 로컬 이미지를 정리합니다.
 
-4. **Tag & Release 생성 (`makeTagAndRelease`)**
-   - 위 3번 배포 프로세스까지 완벽하게 스크립트가 리턴 0 으로 성공하면 비로소 GitHub 릴리즈 노트를 생성하고 공식적으로 버전 태그를 레포지토리에 발행합니다.
+4. **Tag & Release (`makeTagAndRelease`)**
+   - 배포가 성공한 뒤 `github-tag-action`으로 실제 태그 생성 후 GitHub 릴리스를 발행합니다.
 
 ---
 
@@ -33,15 +34,37 @@
 
 - **`AWS_REGION`**: SSM을 구동할 타겟 인프라의 AWS 리전 (예: `ap-northeast-2`)
 - **`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`**: 대상 EC2를 관리하고 SSM 명령을 하달할 수 있는 권한을 가진 AWS IAM 사용자의 자격 증명 (인프라 생성 시 할당됨)
-- **`DOT_ENV`**: 실제 운영 DB(`PostgreSQL`) 접근 URI나, JWT 서명 키 등이 포함된 백엔드의 Base64 변환 전 텍스트 원본 `.env` 내용
+- **`DOT_ENV`**: 운영 `.env` 원본 텍스트(인코딩 전)  
+  - 배포 스크립트는 실행 단계에서 Base64로 변환 후 `/tmp/.env`로 저장해 컨테이너에 주입합니다.
+
+참고: 스크립트는 EC2의 `/etc/environment`에서 `PASSWORD_1`, `APP_1_DOMAIN`를 읽어 NPMplus 로그인 및 도메인 탐색에 사용합니다. 해당 값이 없다면 배포가 실패할 수 있습니다.
 
 ---
 
-## ⚙️ 상세: Blue / Green 메커니즘 
+## ⚙️ 상세: Blue / Green 메커니즘
 
 `deploy` 잡에서 동작하는 블루그린 배포 스크립트(`cat << 'SCRIPT_EOF'`)는 다음 로직을 거칩니다.
 
-- **포트 충돌 회피**: 컨테이너 자체의 로컬 포트를 EC2 호스트에 매핑(`-p 8080:8080`)하지 않고, **도커 커스텀 네트워크(`common`) 내부망**을 활용하므로 하나의 EC2 내에서 동일한 포트 넘버 설정값의 컨테이너를 여러 개 가동할 수 있습니다.
-- **NPMplus API 제어**: 스크립트가 시작되면 Nginx Proxy Manager의 관리용 Admin API로 CURL 로그인을 시도한 후 대상 도메인의 프록시 ID를 추출합니다.
-- **Health Check 전략**: 새로운 백엔드 엔진(Green) 스핀업 후 루프를 돌며 내부망 IP 기반의 스프링 부트 `http://{컨테이너 IP}:8080/actuator/health` 엔드포인트를 호출하며 정상 기동 완료를 확인하고서야 Nginx의 트래픽을 Green으로 넘겨버립니다.
-- **안전 장치**: 실패 시 기존 서비스 중인 도커("Blue")를 건드리지 않은 채로 스크립트는 뻗어버리고 파이프라인은 실패 종료되므로 운영 서비스의 단절을 막습니다.
+- **포트 충돌 회피**: 컨테이너 로컬 포트(`8080`)를 EC2 호스트 포트로 직접 노출하지 않고 도커 네트워크(`common`)에서 컨테이너명 기반으로 통신합니다.
+- **NPMplus API 제어**: `http://127.0.0.1:81`의 NPMplus Admin API(`/api/tokens`, `/api/nginx/proxy-hosts`)로 로그인 후 프록시를 조회/갱신합니다.
+- **Health Check 전략**: `Green` 컨테이너가 컨테이너 IP 기준 `actuator/health`에서 `200`을 반환할 때까지 대기 후 업스트림을 전환합니다.
+- **안전 장치**: 새 컨테이너가 헬스체크 실패 시 기존 `Blue`는 유지한 채 배포를 실패 처리해 가용성 리스크를 낮춥니다.
+
+## 🧩 NPMplus SSE 버퍼링 주의사항
+
+`NPMplus` 템플릿 기준으로 `npmplus_proxy_response_buffering: true`면 Nginx의 `proxy_buffering off`가 적용됩니다.  
+즉, 값이 `true`일 때 SSE에서 버퍼링이 꺼집니다.
+
+현재 `deploy.yml`의 Proxy Host 생성/전환 payload는 다음처럼 설정되어 있습니다.
+
+```json
+{
+  "path": "/sse/",
+  "forward_scheme": "http",
+  "forward_host": "...",
+  "forward_port": 8080,
+  "npmplus_proxy_response_buffering": false
+}
+```
+
+실시간 스트리밍이 필요하면 문서 기준으로는 `npmplus_proxy_response_buffering: true`로 조정해야 합니다.

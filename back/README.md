@@ -101,7 +101,7 @@
 
 50. Redis — 캐시 + ShedLock
 51. @AfterDDL, CustomPostgreSQLDialect, schema.sql
-52. WebSocket — STOMP + SockJS
+52. WebSocket — STOMP + SockJS (Frontend)
 
 **12부. 설계 복기**
 
@@ -599,7 +599,7 @@ http {
 
 ```kotlin
 private fun authenticateIfPossible(request: HttpServletRequest, response: HttpServletResponse) {
-    val (apiKey, accessToken) = extractTokens(request)
+    val (apiKey, accessToken) = extractTokens()
 
     if (apiKey.isBlank() && accessToken.isBlank()) return
 
@@ -622,11 +622,8 @@ private fun authenticateIfPossible(request: HttpServletRequest, response: HttpSe
         ?: throw AppException("401-3", "API 키가 유효하지 않습니다.")
 
     val newAccessToken = actorFacade.genAccessToken(member)
-    response.addCookie(Cookie("accessToken", newAccessToken).apply {
-        path = "/"
-        isHttpOnly = true
-    })
-    response.addHeader(HttpHeaders.AUTHORIZATION, newAccessToken)
+    rq.setCookie("accessToken", newAccessToken)
+    rq.setHeader(HttpHeaders.AUTHORIZATION, newAccessToken)
 
     authenticate(member)
 }
@@ -2157,18 +2154,21 @@ override fun shouldNotFilter(request: HttpServletRequest): Boolean {
 ## 3. 토큰 추출: 헤더 우선, 없으면 쿠키
 
 ```kotlin
-private fun extractTokens(request: HttpServletRequest): Pair<String, String> {
-    val headerAuthorization = request.getHeader(HttpHeaders.AUTHORIZATION).orEmpty()
+private fun extractTokens(): Pair<String, String> {
+    val headerAuthorization = rq.getHeader(HttpHeaders.AUTHORIZATION, "")
 
     return if (headerAuthorization.isNotBlank()) {
         // 헤더가 있으면 헤더에서 읽는다
+        if (!headerAuthorization.startsWith("Bearer ")) {
+            throw AppException("401-2", "${HttpHeaders.AUTHORIZATION} 헤더가 Bearer 형식이 아닙니다.")
+        }
+
         // Authorization: Bearer {apiKey} {accessToken}
         val bits = headerAuthorization.split(" ", limit = 3)
         bits.getOrNull(1).orEmpty() to bits.getOrNull(2).orEmpty()
     } else {
         // 헤더가 없으면 쿠키에서 읽는다
-        request.cookies?.firstOrNull { it.name == "apiKey" }?.value.orEmpty() to
-        request.cookies?.firstOrNull { it.name == "accessToken" }?.value.orEmpty()
+        rq.getCookieValue("apiKey", "") to rq.getCookieValue("accessToken", "")
     }
 }
 ```
@@ -2185,7 +2185,7 @@ private fun extractTokens(request: HttpServletRequest): Pair<String, String> {
 
 ```kotlin
 private fun authenticateIfPossible(request: HttpServletRequest, response: HttpServletResponse) {
-    val (apiKey, accessToken) = extractTokens(request)
+    val (apiKey, accessToken) = extractTokens()
 
     // 1. 둘 다 없으면 인증 시도 안 함
     if (apiKey.isBlank() && accessToken.isBlank()) return
@@ -2213,11 +2213,8 @@ private fun authenticateIfPossible(request: HttpServletRequest, response: HttpSe
 
     // 5. 새 accessToken 발급해서 쿠키와 헤더에 심어준다
     val newAccessToken = actorFacade.genAccessToken(member)
-    response.addCookie(Cookie("accessToken", newAccessToken).apply {
-        path = "/"
-        isHttpOnly = true
-    })
-    response.addHeader(HttpHeaders.AUTHORIZATION, newAccessToken)
+    rq.setCookie("accessToken", newAccessToken)
+    rq.setHeader(HttpHeaders.AUTHORIZATION, newAccessToken)
 
     authenticate(member)
 }
@@ -2720,11 +2717,19 @@ private fun HttpServletResponse.addAuthCookie(name: String, value: String) {
     addCookie(Cookie(name, value).apply {
         path = "/"
         isHttpOnly = true
+        domain = AppFacade.siteCookieDomain
+        secure = true
+        setAttribute("SameSite", "Strict")
+        maxAge = 60 * 60 * 24 * 365
     })
 }
 ```
 
 `isHttpOnly = true` 는 JavaScript에서 이 쿠키를 읽지 못하게 한다. XSS 공격으로 토큰을 탈취하는 걸 막는다.
+`domain = AppFacade.siteCookieDomain` 은 허용된 도메인에서만 쿠키를 전송한다.
+`secure = true` 는 HTTPS에서만 쿠키가 전송되도록 한다.
+`setAttribute("SameSite", "Strict")` 는 크로스 사이트 요청에서 쿠키 자동 전송을 제한한다.
+`maxAge = 60 * 60 * 24 * 365` 는 1년 만료 시간을 설정한다.
 
 ---
 
@@ -2910,8 +2915,8 @@ override fun onAuthenticationSuccess(...) {
     val actor = actorFacade.memberOf(securityUser)
     val accessToken = actorFacade.genAccessToken(actor)
 
-    response.addAuthCookie("apiKey", actor.apiKey)
-    response.addAuthCookie("accessToken", accessToken)
+    rq.setCookie("apiKey", actor.apiKey)
+    rq.setCookie("accessToken", accessToken)
 
     val state = OAuth2State.decode(request.getParameter("state") ?: throw ...)
     response.sendRedirect(state.redirectUrl)
@@ -5435,7 +5440,7 @@ SpringDoc (Swagger UI) 설정이다. `/*/api/v1/**` 패턴으로 API 경로를 �
 
 # 46강. 프론트엔드 구조 개요
 
-프론트엔드는 **Next.js 15 (App Router)** + **React 19** + **TypeScript** + **TailwindCSS** + **shadcn/ui** 스택이다.
+프론트엔드는 **Next.js 16 (App Router)** + **React 19** + **TypeScript** + **TailwindCSS** + **shadcn/ui** 스택이다.
 
 ---
 
@@ -5476,7 +5481,6 @@ front/src/
   "next-themes": "...",         ← 다크모드
   "sonner": "...",              ← Toast 알림
   "@toast-ui/react-editor": "...", ← 마크다운 에디터/뷰어
-  "monaco-editor": "..."        ← 코드 에디터
 }
 ```
 
@@ -5698,9 +5702,9 @@ export default function ClientPage({ initialPost }: { initialPost: PostWithConte
 
 ---
 
-# 50강. WebSocket — STOMP + SockJS
+# 50강. WebSocket — STOMP + SockJS (Frontend)
 
-글이 새로 작성되면 실시간으로 알림이 온다. WebSocket 으로 구현됐다.
+프론트에는 STOMP + SockJS 클라이언트가 있으며, 새 글 알림 구독과 재연결 처리 패턴이 구현되어 있다.
 
 ---
 
@@ -5847,8 +5851,8 @@ export function useNewPostNotification(onNewPost?: (post: PostNotification) => v
   payloadMember = null (토큰 만료)
   member = findByApiKey(apiKey)    ← DB 조회
   newAccessToken = genAccessToken(member)
-  response.addCookie("accessToken", newAccessToken)
-  response.addHeader("Authorization", newAccessToken)
+  rq.setCookie("accessToken", newAccessToken)
+  rq.setHeader(HttpHeaders.AUTHORIZATION, newAccessToken)
   authenticate(member)
   ↓
 [응답] 새 accessToken 이 쿠키 + 헤더에 포함
@@ -6179,7 +6183,7 @@ published=true, listed=true 이면 목록에 공개
 - companion object 정적 접근 패턴
 - `@SpringBootTest` + `@Transactional` 통합 테스트
 
-**프론트엔드 (Next.js 15, React 19, TypeScript)**
+**프론트엔드 (Next.js 16, React 19, TypeScript)**
 - App Router 서버/클라이언트 컴포넌트 분리
 - openapi-typescript + openapi-fetch 타입 안전 API 클라이언트
 - AuthContext + useAuth + withLogin/withAdmin HOC
